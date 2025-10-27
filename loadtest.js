@@ -1,131 +1,254 @@
-/**
- * k6 Load Test Script
- * 
- * This script tests the login-mode endpoint for KornFerry Talent API.
- * 
- * @description Tests the IAM v2 clients login-mode endpoint with email parameter
- * @author Load Test Team
- */
-
 import http from 'k6/http';
-import { sleep, check } from 'k6';
-import { Rate, Counter } from 'k6/metrics';
+import { check, sleep, group } from 'k6';
+import { Trend, Counter } from 'k6/metrics';
+import { htmlReport } from "https://raw.githubusercontent.com/benc-uk/k6-reporter/main/dist/bundle.js";
 
-// ================================================================
-// CUSTOM METRICS
-// ================================================================
+// ========== Custom Metrics ==========
+const latencyTrend = new Trend('api_latency_ms', true);
+const successCounter = new Counter('api_success_count');
+const failureCounter = new Counter('api_failure_count');
 
-/**
- * Custom metric to track successful login-mode requests
- */
-const loginModeSuccess = new Rate('login_mode_success');
+// ========== Load JSON Config ==========
+const config = JSON.parse(open('./apis.json'));
 
-/**
- * Custom metric to track failed login-mode requests
- */
-const loginModeFailure = new Counter('login_mode_failure');
+let authToken;
 
-// ================================================================
-// LOAD TEST CONFIGURATION
-// ================================================================
+// ========== Setup Phase ==========
+export function setup() {
+  console.log(`🔐 Fetching access token...`);
+  const payload = {
+    client_id: config.auth.clientId,
+    grant_type: config.auth.grantType,
+    scope: config.auth.scope,
+    login_mode: config.auth.loginMode,
+    username: config.auth.username,
+    password: config.auth.password,
+  };
 
-/**
- * Define load test scenarios and thresholds
- * 
- * @type {Object}
- * @property {number} stages - Ramp-up and ramp-down stages for realistic load simulation
- * @property {number} vus - Maximum virtual users
- * @property {number} duration - Total test duration
- */
-export let options = {
-  // Define load test stages for realistic ramp-up/ramp-down
+  const params = { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } };
+  const res = http.post(config.auth.tokenUrl, payload, params);
+  
+  if (res.status !== 200) {
+    console.error(`❌ Failed to get token: ${res.status} - ${res.body}`);
+    return { token: null };
+  }
+
+  const token = res.json().access_token;
+  console.log(`✅ Token obtained successfully`);
+  return { token };
+}
+
+// ========== Test Options ==========
+export const options = {
   stages: [
-    { duration: '30s', target: 10 },  // Ramp up to 10 users over 30 seconds
-    { duration: '1m', target: 10 },   // Stay at 10 users for 1 minute
-    { duration: '30s', target: 0 },   // Ramp down to 0 users over 30 seconds
+    { duration: '30s', target: 1 },
+    { duration: '1m', target: 2 },
+    { duration: '30s', target: 0 },
   ],
-  
-  // Alternative: Simple configuration
-  // vus: 10,                    // Number of virtual users
-  // duration: '2m',             // Total test duration
-  
-  // Define performance thresholds
   thresholds: {
-    'http_req_duration': ['p(95)<500'],      // 95% of requests should complete in under 500ms
-    'http_req_failed': ['rate<0.1'],         // Error rate should be less than 10%
-    'login_mode_success': ['rate>0.9'],      // Success rate should be above 90%
+    api_latency_ms: ['p(95)<800'], // 95% of requests < 800ms
+    http_req_failed: ['rate<0.05'], // Error rate should be less than 5%
+    checks: ['rate>0.95'], // 95% of checks should pass
   },
 };
 
-// ================================================================
-// TEST CONFIGURATION
-// ================================================================
+// ========== Test Execution ==========
+export default function (data) {
+  const token = data.token;
 
-/**
- * Base URL for the API
- */
-const BASE_URL = 'https://api.kornferrytalent-dev.com';
+  for (const endpoint of config.endpoints) {
+    group(endpoint.name, function () {
+      const url = `${config.baseUrl}${endpoint.path}`;
 
-/**
- * Test email for login-mode endpoint
- */
-const TEST_EMAIL = 'chami@qa.com';
+      // Build headers conditionally
+      let headers = { 'Content-Type': 'application/json' };
+      if (endpoint.requiresAuth && token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
 
-/**
- * Sleep duration between requests (in seconds)
- */
-const REQUEST_DELAY = 1;
+      let res;
+      const start = new Date().getTime();
 
-// ================================================================
-// MAIN TEST FUNCTION
-// ================================================================
+      try {
+        if (endpoint.method === 'GET') {
+          res = http.get(url, { headers });
+        } else if (endpoint.method === 'POST') {
+          res = http.post(url, JSON.stringify(endpoint.body || {}), { headers });
+        } else if (endpoint.method === 'PUT') {
+          res = http.put(url, JSON.stringify(endpoint.body || {}), { headers });
+        } else if (endpoint.method === 'DELETE') {
+          res = http.del(url, null, { headers });
+        } else {
+          console.error(`⚠️ Unsupported method: ${endpoint.method}`);
+          return;
+        }
 
-/**
- * Main test function executed by each virtual user
- * 
- * This function:
- * 1. Makes a GET request to the login-mode endpoint
- * 2. Validates the response status and structure
- * 3. Records custom metrics
- * 4. Waits before next iteration
- */
-export default function () {
-  // Construct the full URL with query parameters
-  const url = `${BASE_URL}/iam/v2/clients/login-mode?email=${TEST_EMAIL}`;
+        const end = new Date().getTime();
+        const latency = end - start;
+        latencyTrend.add(latency);
+
+        const success = check(res, {
+          [`${endpoint.name} - status ${endpoint.expectedStatus}`]:
+            (r) => r.status === endpoint.expectedStatus,
+        });
+
+        if (success) {
+          successCounter.add(1);
+        } else {
+          failureCounter.add(1);
+          console.error(
+            `❌ ${endpoint.name} failed: got ${res.status}, expected ${endpoint.expectedStatus}`
+          );
+        }
+      } catch (err) {
+        console.error(`🚨 Error executing ${endpoint.name}: ${err}`);
+        failureCounter.add(1);
+      }
+    });
+  }
+
+  sleep(1);
+}
+
+// ========== Custom Summary Output ==========
+export function handleSummary(data) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   
-  // Make GET request to login-mode endpoint
-  const response = http.get(url);
-  
-  // Validate response with multiple checks
-  const checks = check(response, {
-    // Check HTTP status is 200 (success)
-    'status is 200': (r) => r.status === 200,
+  try {
+    // Generate HTML report
+    const htmlReportContent = htmlReport(data);
     
-    // Verify response has content
-    'response has content': (r) => r.body.length > 0,
-    
-    // Check response time is reasonable
-    'response time < 1000ms': (r) => r.timings.duration < 是否有0,
-  });
+    return {
+      // Generate HTML report
+      [`report-${timestamp}.html`]: htmlReportContent,
+      
+      // Generate JSON summary
+      [`summary-${timestamp}.json`]: JSON.stringify({
+        timestamp: data.root_group.timestamp,
+        duration: data.state.testRunDurationMs,
+        metrics: {
+          http_reqs: data.metrics.http_reqs.values,
+          http_req_duration: data.metrics.http_req_duration.values,
+          http_req_failed: data.metrics.http_req_failed.values,
+          checks: data.metrics.checks.values,
+          custom_metrics: {
+            api_latency_ms: data.metrics.api_latency_ms.values,
+            api_success_count: data.metrics.api_success_count.values,
+            api_failure_count: data.metrics.api_failure_count.values,
+          }
+        },
+      }, null, 2),
+      
+      // Console summary (STDOUT)
+      'stdout': customConsoleSummary(data),
+    };
+  } catch (error) {
+    console.error('Error generating summary:', error);
+    // Return just the console summary if HTML generation fails
+    return {
+      'stdout': customConsoleSummary(data),
+    };
+  }
+}
+
+// ========== Custom Console Summary ==========
+function customConsoleSummary(data) {
+  const metrics = data.metrics;
   
-  // Determine if this is an actual failure (non-2xx status) or just a performance issue
-  const isHttpSuccess = response.status >= 200 && response.status < 300;
-  const hasPerformanceIssue = response.timings.duration >= 1000;
+  // Safe access to custom metrics with defaults
+  const apiSuccessCount = metrics.api_success_count?.values?.count || 0;
+  const apiFailureCount = metrics.api_failure_count?.values?.count || 0;
+  const apiLatencyP95 = metrics.api_latency_ms?.values?.['p(95)'] || 0;
   
-  // Update custom metrics based on response
-  loginModeSuccess.add(isHttpSuccess);
+  // Calculate success rate safely
+  const totalApiCalls = apiSuccessCount + apiFailureCount;
+  const successRate = totalApiCalls > 0 ? 
+    ((apiSuccessCount / totalApiCalls) * 100).toFixed(2) : '0.00';
   
-  // Log actual HTTP errors (non-2xx status codes)
-  if (!isHttpSuccess) {
-    loginModeFailure.add(1);
-    console.error(`❌ HTTP Error - Status: ${response.status} ${response.status_text}`);
+  // Handle checks metrics safely
+  const checksCount = metrics.checks?.values?.count || 0;
+  const checksPasses = metrics.checks?.values?.passes || 0;
+  const checksFailures = metrics.checks?.values?.failures || 0;
+  const checksRate = metrics.checks?.values?.rate || 0;
+  
+  // Safe access to HTTP metrics
+  const totalRequests = Math.round(metrics.http_reqs?.values?.count || 0);
+  const httpFailRate = metrics.http_req_failed?.values?.rate || 0;
+  const httpSuccessRate = (100 - httpFailRate * 100).toFixed(2);
+  const httpFailRatePct = (httpFailRate * 100).toFixed(2);
+  const iterations = Math.round(metrics.iterations?.values?.count || 0);
+  const vusMax = data.state.testRunDurationMs !== 0 ? Math.round(metrics.vus?.values?.max || 0) : 0;
+  
+  // HTTP duration metrics
+  const httpAvg = (metrics.http_req_duration?.values?.avg || 0).toFixed(2);
+  const httpMin = (metrics.http_req_duration?.values?.min || 0).toFixed(2);
+  const httpMax = (metrics.http_req_duration?.values?.max || 0).toFixed(2);
+  const httpP90 = (metrics.http_req_duration?.values?.['p(90)'] || 0).toFixed(2);
+  const httpP95 = (metrics.http_req_duration?.values?.['p(95)'] || 0).toFixed(2);
+  
+  return `
+╔══════════════════════════════════════════════════════════════╗
+║                  API LOAD TEST SUMMARY                        ║
+╚══════════════════════════════════════════════════════════════╝
+
+⏱  Test Duration: ${(data.state.testRunDurationMs / 1000).toFixed(2)}s
+👥 Virtual Users: ${vusMax}
+🔄 Total Iterations: ${iterations}
+
+📊 HTTP METRICS
+─────────────────────────────────────────────────────────────
+  Total Requests: ${totalRequests}
+  Success Rate: ${httpSuccessRate}%
+  Failure Rate: ${httpFailRatePct}%
+  
+📈 RESPONSE TIME (ms)
+─────────────────────────────────────────────────────────────
+  Average: ${httpAvg}ms
+  Minimum: ${httpMin}ms
+  Maximum: ${httpMax}ms
+  P90: ${httpP90}ms
+  P95: ${httpP95}ms
+
+✅ CHECK RESULTS
+─────────────────────────────────────────────────────────────
+  Total Checks: ${Math.round(checksCount)}
+  Passed: ${Math.round(checksPasses)}
+  Failed: ${Math.round(checksFailures)}
+  Success Rate: ${(checksRate * 100).toFixed(2)}%
+
+⚡ CUSTOM METRICS
+─────────────────────────────────────────────────────────────
+  API Success: ${Math.round(apiSuccessCount)} (${successRate}%)
+  API Failures: ${Math.round(apiFailureCount)}
+  Custom Latency P95: ${apiLatencyP95.toFixed(2)}ms
+
+🎯 THRESHOLD STATUS
+─────────────────────────────────────────────────────────────
+${getThresholdStatus(data)}
+
+💾 Detailed reports saved to:
+   - HTML: report-*.html
+   - JSON: summary-*.json
+
+╚══════════════════════════════════════════════════════════════╝
+`;
+}
+
+// Helper function to format threshold status
+function getThresholdStatus(data) {
+  // Access metrics and check their threshold results
+  const metrics = data.metrics;
+  const results = [];
+  
+  // Check each metric for threshold results
+  for (const [metricName, metricData] of Object.entries(metrics)) {
+    if (metricData.thresholds && metricData.thresholds.length > 0) {
+      metricData.thresholds.forEach(threshold => {
+        const status = threshold.ok ? '✓' : '✗';
+        results.push(`  ${status} ${metricName}: ${threshold.values}`);
+      });
+    }
   }
   
-  // Log performance warnings (slow responses but still successful)
-  if (isHttpSuccess && hasPerformanceIssue) {
-    console.warn(`⚠️  Performance Warning - Response time: ${response.timings.duration.toFixed(0)}ms (threshold: 1000ms evaluation`);
-  }
-  
-  // Wait before next request to simulate user behavior
-  sleep(REQUEST_DELAY);
+  return results.length > 0 ? results.join('\n') : '  No thresholds defined';
 }
