@@ -1,0 +1,50 @@
+{
+  "baseUrl": "https://api.kornferrytalent-dev.com",
+  "auth": {
+    "tokenUrl": "https://idp.kornferrytalent-dev.com/realms/dev/protocol/openid-connect/token",
+    "clientId": "landing-page",
+    "clientSecret": "",
+    "grantType": "password",
+    "username": "ava.thompson1@kftest002.com",
+    "password": "",
+    "scope": "openid profile email",
+    "loginMode": "ldap"
+  },
+  "endpoints": [
+    {
+      "name": "Get Login Mode",
+      "method": "GET",
+      "path": "/iam/v2/clients/login-mode?email=kf1sadmin@kfdbhdevoutlook.onmicrosoft.com",
+      "expectedStatus": 200,
+      "requiresAuth": false
+    },
+    {
+      "name": "Get User Consent",
+      "method": "GET",
+      "path": "/iam/v2/privacy/user-consent",
+      "expectedStatus": 200,
+      "requiresAuth": true
+    },
+    {
+      "name": "Get User Preferences",
+      "method": "GET",
+      "path": "/iam/v2/users/preferences",
+      "expectedStatus": 200,
+      "requiresAuth": true
+    },
+    {
+      "name": "Get Permissions",
+      "method": "GET",
+      "path": "/iam/v1/auth/permissions",
+      "expectedStatus": 200,
+      "requiresAuth": true
+    },
+    {
+      "name": "Get Clients",
+      "method": "GET",
+      "path": "/core/v2/clients?limit=10&page=1",
+      "expectedStatus": 200,
+      "requiresAuth": true
+    }
+  ]
+}
