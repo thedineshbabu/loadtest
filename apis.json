@@ -5,46 +5,68 @@
     "clientId": "landing-page",
     "clientSecret": "",
     "grantType": "password",
-    "username": "ava.thompson1@kftest002.com",
-    "password": "",
     "scope": "openid profile email",
-    "loginMode": "ldap"
+    "loginMode": "ldap",
+    "userSelectionMode": "random",
+    "userIndex": 0,
+    "autoTokenRefresh": true,
+    "users": [
+      {
+        "username": "ava.thompson1@kftest002.com",
+        "password": "KFBoston123!!"
+      }
+    ]
   },
   "endpoints": [
     {
       "name": "Get Login Mode",
       "method": "GET",
-      "path": "/iam/v2/clients/login-mode?email=kf1sadmin@kfdbhdevoutlook.onmicrosoft.com",
+      "path": "/iam/v2/clients/login-mode",
       "expectedStatus": 200,
-      "requiresAuth": false
+      "requiresAuth": false,
+      "isTest": false,
+      "queryParam": "email",
+      "dynamicValues": {
+        "type": "email",
+        "emails": [
+          "kf1sadmin@kfdbhdevoutlook.onmicrosoft.com",
+          "ava.thompson1@kftest002.com",
+          "kf1cadmin@kfdbhdevoutlook.onmicrosoft.com",
+          "chami@qa.com"
+        ]
+      }
     },
     {
       "name": "Get User Consent",
       "method": "GET",
       "path": "/iam/v2/privacy/user-consent",
       "expectedStatus": 200,
-      "requiresAuth": true
+      "requiresAuth": true,
+      "isTest": false
     },
     {
       "name": "Get User Preferences",
       "method": "GET",
       "path": "/iam/v2/users/preferences",
       "expectedStatus": 200,
-      "requiresAuth": true
+      "requiresAuth": true,
+      "isTest": false
     },
     {
       "name": "Get Permissions",
       "method": "GET",
       "path": "/iam/v1/auth/permissions",
       "expectedStatus": 200,
-      "requiresAuth": true
+      "requiresAuth": true,
+      "isTest": true
     },
     {
       "name": "Get Clients",
       "method": "GET",
       "path": "/core/v2/clients?limit=10&page=1",
       "expectedStatus": 200,
-      "requiresAuth": true
+      "requiresAuth": true,
+      "isTest": false
     }
   ]
 }

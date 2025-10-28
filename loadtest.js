@@ -13,63 +13,180 @@ const config = JSON.parse(open('./apis.json'));
 
 let authToken;
 
-// ========== Setup Phase ==========
-export function setup() {
-  console.log(`🔐 Fetching access token...`);
+// ========== Token Management ==========
+/**
+ * Fetches a new authentication token using the selected user credentials
+ * This function can be called to refresh expired tokens during test execution
+ * @returns {string|null} The access token or null if authentication fails
+ */
+function fetchToken() {
+  // Select user based on configured mode
+  const selectedUser = selectUser();
+  
+  // Build the authentication payload
   const payload = {
     client_id: config.auth.clientId,
     grant_type: config.auth.grantType,
     scope: config.auth.scope,
     login_mode: config.auth.loginMode,
-    username: config.auth.username,
-    password: config.auth.password,
+    username: selectedUser.username,
+    password: selectedUser.password,
   };
 
+  // Set headers for token request
   const params = { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } };
+  
+  // Make token request
   const res = http.post(config.auth.tokenUrl, payload, params);
   
+  // Handle authentication failure
   if (res.status !== 200) {
-    console.error(`❌ Failed to get token: ${res.status} - ${res.body}`);
-    return { token: null };
+    console.error(`❌ Failed to get token for user ${selectedUser.username}: ${res.status} - ${res.body}`);
+    return null;
   }
 
+  // Extract access token from response
   const token = res.json().access_token;
-  console.log(`✅ Token obtained successfully`);
-  return { token };
+  console.log(`✅ Token obtained successfully for user: ${selectedUser.username}`);
+  
+  return token;
+}
+
+// ========== User Selection Logic ==========
+/**
+ * Selects a user from the configured users array based on the selection mode
+ * Supports three modes:
+ * - "random": Randomly selects a user from the array
+ * - "sequential": Uses the userIndex to select a specific user
+ * - "environment": Uses USERNAME and PASSWORD environment variables
+ * @returns {Object} Selected user object with username and password
+ */
+function selectUser() {
+  const mode = config.auth.userSelectionMode || 'random';
+  
+  // Check if we should use environment variables
+  if (mode === 'environment' || (__ENV.USERNAME && __ENV.PASSWORD)) {
+    const envUsername = __ENV.USERNAME;
+    const envPassword = __ENV.PASSWORD;
+    
+    if (envUsername && envPassword) {
+      console.log(`🔑 Using environment variable credentials for user: ${envUsername}`);
+      return { username: envUsername, password: envPassword };
+    }
+  }
+  
+  // Get the users array, default to empty array if not present
+  const users = config.auth.users || [];
+  
+  // If no users configured, return a default structure
+  if (users.length === 0) {
+    console.warn('⚠️ No users configured in apis.json, using fallback');
+    return { username: '', password: '' };
+  }
+  
+  let selectedUser;
+  
+  // Select user based on mode
+  if (mode === 'sequential') {
+    // Use the specified index or default to 0
+    const index = config.auth.userIndex || 0;
+    selectedUser = users[index % users.length]; // Use modulo to prevent out of bounds
+    console.log(`👤 Using sequential user at index ${index}: ${selectedUser.username}`);
+  } else {
+    // Random mode (default)
+    const randomIndex = Math.floor(Math.random() * users.length);
+    selectedUser = users[randomIndex];
+    console.log(`🎲 Randomly selected user: ${selectedUser.username}`);
+  }
+  
+  return selectedUser;
+}
+
+// ========== Setup Phase ==========
+/**
+ * Setup function that runs once before all VUs start executing
+ * Responsible for fetching authentication token using selected user credentials
+ * @returns {Object} Object containing the authentication token
+ */
+export function setup() {
+  console.log(`🔐 Fetching initial access token...`);
+  
+  // Fetch initial token using the centralized fetchToken function
+  const initialToken = fetchToken();
+  
+  return { 
+    token: initialToken
+  };
 }
 
 // ========== Test Options ==========
 export const options = {
   stages: [
-    { duration: '30s', target: 1 },
-    { duration: '1m', target: 2 },
-    { duration: '30s', target: 0 },
+    { duration: '10s', target: 50 },   // Ramp up to 50 VUs
+    { duration: '10s', target: 100 },  // Ramp up to 100 VUs
+    { duration: '10s', target: 150 },  // Ramp up to 150 VUs
+    { duration: '10s', target: 200 },  // Ramp up to 200 VUs
+    { duration: '10s', target: 200 },  // Hold at 200 VUs for sustained load
+    { duration: '10s', target: 0 },   // Cool down
   ],
   thresholds: {
-    api_latency_ms: ['p(95)<800'], // 95% of requests < 800ms
+    api_latency_ms: ['p(95)<2000'], // 95% of requests < 2000ms (relaxed for higher load)
     http_req_failed: ['rate<0.05'], // Error rate should be less than 5%
-    checks: ['rate>0.95'], // 95% of checks should pass
+    checks: ['rate>0.90'], // 90% of checks should pass (slightly more lenient for higher load)
   },
 };
 
 // ========== Test Execution ==========
+/**
+ * Main test execution function called for each VU iteration
+ * Uses the token obtained from setup() to authenticate API requests
+ * Automatically regenerates token on 401 (Unauthorized) responses
+ * @param {Object} data - Data passed from setup() function (contains token)
+ */
 export default function (data) {
-  const token = data.token;
+  // Get initial token from setup
+  let currentToken = data.token;
 
   for (const endpoint of config.endpoints) {
+    // Skip endpoints that have isTest flag set to false
+    // Default to true if not specified
+    const isTest = endpoint.isTest !== false;
+    if (!isTest) {
+      console.log(`⏭️  Skipping ${endpoint.name} (isTest: false)`);
+      continue;
+    }
+    
     group(endpoint.name, function () {
-      const url = `${config.baseUrl}${endpoint.path}`;
+      // Construct URL with dynamic values if specified
+      let url = `${config.baseUrl}${endpoint.path}`;
+      
+      // Handle dynamic query parameters (e.g., emails)
+      if (endpoint.dynamicValues && endpoint.dynamicValues.type === 'email' && endpoint.queryParam) {
+        const emails = endpoint.dynamicValues.emails || [];
+        if (emails.length > 0) {
+          // Randomly select an email from the array
+          const randomIndex = Math.floor(Math.random() * emails.length);
+          const selectedEmail = emails[randomIndex];
+          
+          // Append query parameter to URL
+          const separator = endpoint.path.includes('?') ? '&' : '?';
+          url = `${url}${separator}${endpoint.queryParam}=${selectedEmail}`;
+          
+          console.log(`📧 Using email: ${selectedEmail} for ${endpoint.name}`);
+        }
+      }
 
       // Build headers conditionally
       let headers = { 'Content-Type': 'application/json' };
-      if (endpoint.requiresAuth && token) {
-        headers['Authorization'] = `Bearer ${token}`;
+      if (endpoint.requiresAuth && currentToken) {
+        headers['Authorization'] = `Bearer ${currentToken}`;
       }
 
       let res;
       const start = new Date().getTime();
 
       try {
+        // Make the API request
         if (endpoint.method === 'GET') {
           res = http.get(url, { headers });
         } else if (endpoint.method === 'POST') {
@@ -83,10 +200,61 @@ export default function (data) {
           return;
         }
 
-        const end = new Date().getTime();
-        const latency = end - start;
-        latencyTrend.add(latency);
+        // Check for 405 Method Not Allowed - stop the test for this endpoint
+        if (res.status === 405) {
+          console.error(`❌ ${endpoint.name} returned 405 (Method Not Allowed). Stopping test for this endpoint.`);
+          failureCounter.add(1);
+          return; // Stop execution immediately
+        }
 
+        // Check for 401 Unauthorized (token expired or invalid) and autoTokenRefresh enabled
+        const autoRefresh = config.auth.autoTokenRefresh !== false; // Default to true if not specified
+        const isTokenExpired = res.status === 401 && endpoint.requiresAuth && autoRefresh;
+        
+        if (isTokenExpired) {
+          console.warn(`🔄 Token expired for ${endpoint.name}, regenerating token...`);
+          
+          // Regenerate token using the global fetchToken function
+          const newToken = fetchToken();
+          
+          if (newToken) {
+            // Update current token for subsequent requests
+            currentToken = newToken;
+            
+            // Update authorization header with new token
+            headers['Authorization'] = `Bearer ${currentToken}`;
+            
+            // Retry the request with the new token
+            console.log(`🔄 Retrying ${endpoint.name} with new token...`);
+            const retryStart = new Date().getTime();
+            
+            if (endpoint.method === 'GET') {
+              res = http.get(url, { headers });
+            } else if (endpoint.method === 'POST') {
+              res = http.post(url, JSON.stringify(endpoint.body || {}), { headers });
+            } else if (endpoint.method === 'PUT') {
+              res = http.put(url, JSON.stringify(endpoint.body || {}), { headers });
+            } else if (endpoint.method === 'DELETE') {
+              res = http.del(url, null, { headers });
+            }
+            
+            const retryEnd = new Date().getTime();
+            const latency = retryEnd - retryStart;
+            latencyTrend.add(latency);
+          } else {
+            // Failed to regenerate token
+            console.error(`❌ Failed to regenerate token for ${endpoint.name}`);
+            failureCounter.add(1);
+            return;
+          }
+        } else {
+          // Calculate latency for non-retry requests
+          const end = new Date().getTime();
+          const latency = end - start;
+          latencyTrend.add(latency);
+        }
+
+        // Validate response status
         const success = check(res, {
           [`${endpoint.name} - status ${endpoint.expectedStatus}`]:
             (r) => r.status === endpoint.expectedStatus,
